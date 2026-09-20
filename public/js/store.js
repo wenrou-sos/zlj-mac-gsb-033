@@ -105,7 +105,7 @@ async 'orders'(el) {
             <div class="p-l">金额试算</div>
             <div id="quote" style="margin-top:6px;font-size:13px;line-height:1.9"><span class="muted">选择项目和技师后自动试算…</span></div>
           </div>
-          <button class="btn btn-gold" style="width:100%;justify-content:center;padding:11px" id="o-submit">✓ 确认开单结账</button>`}
+          <button class="btn btn-gold" style="width:100%;justify-content:center;padding:11px" id="o-submit">✓ 确认开单结账（同步扣减耗材）</button>`}
         </div>
       </div>
       <div class="card">
@@ -137,29 +137,49 @@ async 'orders'(el) {
     await api.post('/api/shifts', { shiftCode: 'day' }); toast('已开班'); this.orders(el);
   });
 
+  let stockOk = true;
   const quote = async () => {
     const serviceId = $('#o-svc', el).value, techId = $('#o-tech', el).value, memberId = $('#o-member', el).value;
     $('#pay-row', el).style.display = memberId ? 'none' : '';
+    stockOk = true;
     if (!serviceId || !techId) return;
     try {
       const q = await api.post('/api/orders/quote', { serviceId, techId, memberId: memberId || null });
+      stockOk = q.stock.ok;
+      const stockHtml = q.stock.lines.length ? `<hr style="border:0;border-top:1px dashed var(--line);margin:6px 0">
+        <div class="muted" style="font-size:12px">本单耗材（临期批次优先扣减）：</div>
+        ${q.stock.lines.map(x => `<div style="display:flex;justify-content:space-between">
+          <span>${esc(x.materialName)} × ${x.need}${esc(x.unit)}</span>
+          <span style="color:${x.enough ? 'var(--jade)' : 'var(--red)'};font-weight:${x.enough ? '400' : '700'}">${x.enough ? '可用 ' + x.available : '缺 ' + Math.round((x.need - x.available) * 1000) / 1000 + '（可用 ' + x.available + '）'}</span></div>`).join('')}`
+        : '<div class="muted" style="font-size:12px">该项目未配置耗材配方，不扣库存</div>';
       $('#quote', el).innerHTML = `
         挂牌价 <b>${fmtMoney(q.price)}</b>${q.discountRate < 1 ? ` ｜ 会员折扣 <b style="color:var(--gold)">${(q.discountRate * 10).toFixed(1)}折</b>` : ''}<br>
         实付金额 <b class="money" style="font-size:16px">${fmtMoney(q.amount)}</b> ｜ 技师提成 <b style="color:var(--red)">${fmtMoney(q.commission)}</b><br>
-        <span class="muted">提成依据：${esc(q.basis)}</span>${memberId ? `<br><span class="muted">会员卡余额 ${fmtMoney(q.balance)}</span>` : ''}`;
+        <span class="muted">提成依据：${esc(q.basis)}</span>${memberId ? `<br><span class="muted">会员卡余额 ${fmtMoney(q.balance)}</span>` : ''}
+        ${stockHtml}
+        ${q.stock.ok ? '' : '<div style="color:var(--red);font-weight:700;margin-top:4px">⛔ 耗材库存不足，请先补货入库或盘点后再开单（整单不会提交）</div>'}`;
+      $('#o-submit', el).disabled = !q.stock.ok;
+      $('#o-submit', el).textContent = q.stock.ok ? '✓ 确认开单结账（同步扣减耗材）' : '⛔ 耗材不足，无法开单';
     } catch (e) { $('#quote', el).textContent = e.message; }
   };
   if (shift) {
     ['o-svc', 'o-tech', 'o-member'].forEach(id => $('#' + id, el).onchange = quote);
+    quote();
     $('#o-submit', el).onclick = async () => {
-      const body = { serviceId: $('#o-svc', el).value, techId: $('#o-tech', el).value, payMethod: $('#o-pay', el).value };
+      const body = {
+        serviceId: $('#o-svc', el).value, techId: $('#o-tech', el).value, payMethod: $('#o-pay', el).value,
+        clientReqId: 'ORD-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8),
+      };
       const mid = $('#o-member', el).value; if (mid) body.memberId = mid;
       if (!body.serviceId || !body.techId) return toast('请选择项目与技师', 'error');
+      if (!stockOk) return toast('耗材库存不足，整单无法提交', 'error');
+      const btn = $('#o-submit', el);
+      btn.disabled = true;
       try {
         const r = await api.post('/api/orders', body);
-        toast(`开单成功：${fmtMoney(r.amount)}（提成 ${fmtMoney(r.techCommission)}）`);
+        toast(`${r.idempotent ? '该单已提交（幂等）' : '开单成功'}：${fmtMoney(r.amount)}（提成 ${fmtMoney(r.techCommission)}）`);
         this.orders(el);
-      } catch (e) { toast(e.message, 'error'); }
+      } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
     };
     reloadList();
   }

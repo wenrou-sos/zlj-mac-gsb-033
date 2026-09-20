@@ -19,11 +19,23 @@ const App = {
       { path: '/hq/handovers', icon: '📋', name: '交班记录' },
       { path: '/hq/recharges', icon: '💳', name: '充值流水' },
     ]},
+    { role: 'hq', group: '耗材库存', items: [
+      { path: '/hq/inventory', icon: '📦', name: '库存总览' },
+      { path: '/hq/materials', icon: '🧴', name: '耗材与配方' },
+      { path: '/hq/stock-ledger', icon: '📑', name: '出入库流水' },
+    ]},
     { role: 'store', group: '门店运营', items: [
       { path: '/store/dashboard', icon: '🏠', name: '门店看板' },
       { path: '/store/orders', icon: '🧾', name: '上钟开单' },
       { path: '/store/handover', icon: '📝', name: '交班结算' },
       { path: '/store/performance', icon: '💰', name: '技师业绩提成' },
+    ]},
+    { role: 'store', group: '耗材库存', items: [
+      { path: '/store/inventory', icon: '📦', name: '库存工作台' },
+      { path: '/store/inbound', icon: '📥', name: '耗材入库' },
+      { path: '/store/stock-check', icon: '🧮', name: '库存盘点' },
+      { path: '/store/transfers', icon: '🔀', name: '跨店调拨' },
+      { path: '/store/stock-ledger', icon: '📑', name: '出入库流水' },
     ]},
     { role: 'store', group: '人员与会员', items: [
       { path: '/store/technicians', icon: '🧑‍🔧', name: '技师管理' },
@@ -36,9 +48,12 @@ const App = {
     '/hq/dashboard': '品牌经营看板', '/hq/stores': '门店管理', '/hq/services': '项目与统一定价',
     '/hq/membership': '会员体系', '/hq/commission': '技师提成标准', '/hq/technicians': '技师档案',
     '/hq/transfers': '跨店调动记录', '/hq/orders': '全部门店账单', '/hq/handovers': '交班记录', '/hq/recharges': '会员充值流水',
+    '/hq/inventory': '总部库存总览', '/hq/materials': '耗材与标准配方', '/hq/stock-ledger': '全品牌出入库流水',
     '/store/dashboard': '门店看板', '/store/orders': '上钟开单', '/store/handover': '交班结算',
     '/store/performance': '技师业绩提成', '/store/technicians': '技师管理', '/store/members': '会员管理',
     '/store/handovers': '历史交班记录',
+    '/store/inventory': '门店库存工作台', '/store/inbound': '耗材批次入库', '/store/stock-check': '库存盘点',
+    '/store/transfers': '跨店调拨', '/store/stock-ledger': '本店出入库流水',
   },
 
   async start() {

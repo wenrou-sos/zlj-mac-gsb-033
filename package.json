@@ -5,7 +5,10 @@
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
-    "seed": "node server/db.js --reseed"
+    "seed": "node server/db.js --reseed",
+    "test": "node test-e2e.js",
+    "test:inventory": "node test-inventory.js",
+    "test:inventory:dom": "node test-inventory-dom.js"
   },
   "license": "MIT"
 }
