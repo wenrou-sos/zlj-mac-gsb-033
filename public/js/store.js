@@ -105,6 +105,10 @@ async 'orders'(el) {
             <div class="p-l">金额试算</div>
             <div id="quote" style="margin-top:6px;font-size:13px;line-height:1.9"><span class="muted">选择项目和技师后自动试算…</span></div>
           </div>
+          <div class="pay-box mb-16" style="background:#fbfaf3;text-align:left">
+            <div class="p-l">耗材配方占用（临期批次优先 FEFO）</div>
+            <div id="consume" style="margin-top:6px;font-size:13px;line-height:1.9"><span class="muted">选择项目后显示标准耗用与本店库存…</span></div>
+          </div>
           <button class="btn btn-gold" style="width:100%;justify-content:center;padding:11px" id="o-submit">✓ 确认开单结账</button>`}
         </div>
       </div>
@@ -122,7 +126,9 @@ async 'orders'(el) {
     $('#order-list', el).innerHTML = list.length ? `
       <table class="tbl"><thead><tr><th>时间</th><th>项目</th><th>技师</th><th>会员</th><th class="num">实付</th><th>支付</th><th class="num">技师提成</th></tr></thead>
       <tbody>${list.map(o => `
-        <tr><td class="nowrap muted">${o.createdAt.slice(11, 16)}</td><td>${esc(o.serviceName)}</td><td>${esc(o.techName)}</td>
+        <tr><td class="nowrap muted">${o.createdAt.slice(11, 16)}</td>
+        <td>${esc(o.serviceName)}${(o.consumedMaterials || []).length ? `<div style="margin-top:2px">${o.consumedMaterials.map(x => `<span class="tag tag-gray" style="font-size:11px;margin:1px">${esc(x.name)}×${x.qty}</span>`).join('')}</div>` : ''}</td>
+        <td>${esc(o.techName)}</td>
         <td>${o.memberName ? esc(o.memberName) : '<span class="muted">散客</span>'}</td>
         <td class="num money">${fmtMoney(o.amount)}</td><td>${payTag(o.payMethod)}</td>
         <td class="num">${fmtMoney(o.techCommission)}</td></tr>`).join('')}
@@ -140,6 +146,24 @@ async 'orders'(el) {
   const quote = async () => {
     const serviceId = $('#o-svc', el).value, techId = $('#o-tech', el).value, memberId = $('#o-member', el).value;
     $('#pay-row', el).style.display = memberId ? 'none' : '';
+    /* 耗材配方占用（不依赖技师，选项切换即刷新） */
+    const consumeEl = $('#consume', el);
+    if (consumeEl && serviceId) {
+      try {
+        const q0 = await api.get('/api/inventory/requirement?serviceId=' + serviceId);
+        if (!q0.items.length) {
+          consumeEl.innerHTML = '<span class="muted">该项目未设置耗材配方，开单不占用库存</span>';
+        } else {
+          consumeEl.innerHTML = q0.items.map(c => `
+            <div style="display:flex;justify-content:space-between;gap:8px">
+              <span>${esc(c.name)} × <b>${c.qty}</b>${esc(c.unitName)}</span>
+              <span>${c.ready ? `<span class="tag tag-green">可用 ${c.available}${esc(c.unitName)}</span>` : `<span class="tag tag-red">不足（可用 ${c.available}${esc(c.unitName)}）</span>`}</span>
+            </div>`).join('');
+        }
+      } catch (e) { consumeEl.textContent = e.message; }
+    } else if (consumeEl) {
+      consumeEl.innerHTML = '<span class="muted">请先选择项目</span>';
+    }
     if (!serviceId || !techId) return;
     try {
       const q = await api.post('/api/orders/quote', { serviceId, techId, memberId: memberId || null });
@@ -152,14 +176,17 @@ async 'orders'(el) {
   if (shift) {
     ['o-svc', 'o-tech', 'o-member'].forEach(id => $('#' + id, el).onchange = quote);
     $('#o-submit', el).onclick = async () => {
-      const body = { serviceId: $('#o-svc', el).value, techId: $('#o-tech', el).value, payMethod: $('#o-pay', el).value };
+      const body = { serviceId: $('#o-svc', el).value, techId: $('#o-tech', el).value, payMethod: $('#o-pay', el).value, $idem: InvUI.idem('order') };
       const mid = $('#o-member', el).value; if (mid) body.memberId = mid;
       if (!body.serviceId || !body.techId) return toast('请选择项目与技师', 'error');
+      const btn = $('#o-submit', el);
+      btn.disabled = true;
       try {
         const r = await api.post('/api/orders', body);
-        toast(`开单成功：${fmtMoney(r.amount)}（提成 ${fmtMoney(r.techCommission)}）`);
+        const used = (r.consumedMaterials || []).map(x => `${x.name}×${x.qty}${x.unitName}`).join('、');
+        toast(`开单成功：${fmtMoney(r.amount)}（提成 ${fmtMoney(r.techCommission)}）${used ? '，已扣耗材 ' + used : ''}`);
         this.orders(el);
-      } catch (e) { toast(e.message, 'error'); }
+      } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
     };
     reloadList();
   }

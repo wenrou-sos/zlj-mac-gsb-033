@@ -9,6 +9,7 @@ const path = require('path');
 const url = require('url');
 const crypto = require('crypto');
 const { load, save, nowLocal, fmtDate } = require('./db');
+const inv = require('./inventory');
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -43,6 +44,8 @@ function syncCounters() {
     training: 'trainings', transfer: 'transfers',
     shift: 'shifts', handover: 'handovers',
     order: 'orders', commissionRule: 'commissionRules', user: 'users',
+    unit: 'units', material: 'materials', recipe: 'recipes',
+    batch: 'invBatches', check: 'invChecks', itransfer: 'invTransfers', ledger: 'invLedger',
   };
   for (const [key, tableName] of Object.entries(tableKey)) {
     let max = db.counters[key] || 0;
@@ -73,6 +76,26 @@ function enrichMember(m) {
   return { ...m, levelName: lv?.name, discount: lv?.discount, storeName: store?.name };
 }
 function payLabel(p) { return { cash: '现金', card: '刷卡', member: '会员卡', mp: '移动支付' }[p] || p; }
+/* 批量为账单视图附加耗材耗用（按 orderId 一次聚合流水） */
+function attachConsumed(orderViews) {
+  if (!orderViews.length) return;
+  const ids = new Set(orderViews.map(o => o.id));
+  const byOrder = {};
+  for (const x of db.invLedger) {
+    if (x.type !== 'order' || !ids.has(x.refId)) continue;
+    (byOrder[x.refId] ||= []).push(x);
+  }
+  for (const o of orderViews) {
+    const rows = byOrder[o.id] || [];
+    const byMat = {};
+    rows.forEach(r => { byMat[r.materialId] = (byMat[r.materialId] || 0) + r.qty; });
+    o.consumedMaterials = Object.entries(byMat).map(([materialId, qty]) => ({
+      materialId, qty: inv.roundQty(qty),
+      name: db.materials.find(m => m.id === materialId)?.name || materialId,
+      unitName: db.units.find(u => u.id === db.materials.find(m => m.id === materialId)?.unitId)?.name || '',
+    }));
+  }
+}
 function orderView(o) {
   return {
     ...o,
@@ -240,6 +263,7 @@ r('GET', /^\/api\/bootstrap$/, async (req, res, p, user) => {
     store: user.storeId ? db.stores.find(s => s.id === user.storeId) : null,
     stores: db.stores, services: db.services, techLevels: db.techLevels,
     memberLevels: db.memberLevels, shiftDefs: db.shiftDefs,
+    units: db.units, materials: db.materials, recipes: db.recipes,
   });
 }, { auth: true });
 
@@ -526,6 +550,7 @@ r('GET', /^\/api\/handovers\/(\w+)$/, async (req, res, p, user, m) => {
   if (user.role === 'store' && h.storeId !== user.storeId) return fail(res, '无权查看', 403);
   const orders = db.orders.filter(o => o.shiftId === h.shiftId).map(orderView)
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  attachConsumed(orders);
   json(res, { ...h, storeName: db.stores.find(s => s.id === h.storeId)?.name, orders });
 }, { auth: true });
 
@@ -537,21 +562,33 @@ r('GET', /^\/api\/orders$/, async (req, res, p, user) => {
   if (p.query.shiftId) list = list.filter(o => o.shiftId === p.query.shiftId);
   if (p.query.date) list = list.filter(o => o.businessDate === p.query.date);
   if (p.query.techId) list = list.filter(o => o.techId === p.query.techId);
-  json(res, list.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 300).map(orderView));
+  const view = list.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 300).map(orderView);
+  attachConsumed(view);
+  json(res, view);
 }, { auth: true });
 r('POST', /^\/api\/orders\/quote$/, async (req, res, p, user, m, body) => {
   const svc = db.services.find(v => v.id === body.serviceId);
   const tech = db.technicians.find(t => t.id === body.techId);
   if (!svc || !tech) return fail(res, '请选择项目与技师');
+  const storeId = user.role === 'store' ? user.storeId : (body.storeId || tech.storeId);
   const mem = body.memberId ? db.members.find(x => x.id === body.memberId) : null;
   const rate = mem ? memberLevel(mem).discount : 1;
   const amount = Math.round(svc.price * rate);
   const cm = calcCommission(svc.id, tech.levelId, amount);
-  json(res, { price: svc.price, discountRate: rate, amount, commission: cm.value, basis: cm.basis, balance: mem ? mem.balance : null });
+  const consume = inv.quoteRequirement(db, storeId, svc.id, todayStr());
+  json(res, { price: svc.price, discountRate: rate, amount, commission: cm.value, basis: cm.basis, balance: mem ? mem.balance : null, consume });
 }, { auth: true });
 r('POST', /^\/api\/orders$/, async (req, res, p, user, m, body) => {
   const storeId = user.role === 'store' ? user.storeId : (body.storeId || null);
   if (!storeId) return fail(res, '请选择门店');
+
+  /* 幂等：相同 idemKey 的重复提交直接返回首次结果（防双击/重试导致重复开单、重复扣库存） */
+  const idemKey = body.$idem ? `order:${storeId}:${body.$idem}` : '';
+  if (idemKey) {
+    const hit = db.idempotency.find(x => x.scope === 'order' && x.key === idemKey);
+    if (hit) return json(res, hit.result);
+  }
+
   const svc = db.services.find(v => v.id === body.serviceId && v.active);
   if (!svc) return fail(res, '服务项目不存在或已下架');
   const tech = db.technicians.find(t => t.id === body.techId);
@@ -578,6 +615,14 @@ r('POST', /^\/api\/orders$/, async (req, res, p, user, m, body) => {
   if (memberId) payMethod = 'member';
   if (!['cash', 'card', 'mp', 'member'].includes(payMethod)) return fail(res, '支付方式无效');
 
+  /* 原子扣减：先按配方 FEFO 预演全部耗材，任一不足直接整单失败（此时尚未写任何数据） */
+  let consumePlan;
+  try {
+    consumePlan = inv.planOrderConsume(db, storeId, svc.id, todayStr());
+  } catch (e) {
+    return fail(res, e.message, 409);
+  }
+
   const cm = calcCommission(svc.id, tech.levelId, amount);
   const now = nowLocal();
   const order = {
@@ -586,13 +631,21 @@ r('POST', /^\/api\/orders$/, async (req, res, p, user, m, body) => {
     price: svc.price, discountRate, amount, payMethod, techCommission: cm.value,
     duration: svc.duration, createdAt: now, businessDate: todayStr(),
   };
+
+  /* 预演通过后一次性提交：账单 + 库存 + 会员余额，全部同步变更，中间无失败分支 */
   db.orders.push(order);
+  inv.commitOrderConsume(db, storeId, order, user.name, consumePlan);
   if (memberId) {
     const mem = db.members.find(x => x.id === memberId);
     mem.balance -= amount; mem.totalConsume += amount;
   }
+  const result = {
+    ...order, commissionBasis: cm.basis, payMethodName: payLabel(payMethod),
+    consumedMaterials: inv.orderConsumedView(db, order),
+  };
+  if (idemKey) db.idempotency.push({ scope: 'order', key: idemKey, result, ts: nowLocal() });
   save();
-  json(res, { ...order, commissionBasis: cm.basis, payMethodName: payLabel(payMethod) });
+  json(res, result);
 }, { auth: true });
 
 /* ===== 门店看板 / 技师业绩 ===== */
@@ -626,6 +679,163 @@ r('GET', /^\/api\/recharges$/, async (req, res, p) => {
     payMethodName: payLabel(x.payMethod),
   })));
 }, { auth: true, role: 'hq' });
+
+/* ===== 耗材库存：总部主数据（单位/耗材/配方） ===== */
+r('GET', /^\/api\/inventory\/materials$/, async (req, res, p, user) => {
+  json(res, inv.listMaterials(db));
+}, { auth: true });
+r('POST', /^\/api\/inventory\/materials$/, async (req, res, p, user, m, body) => {
+  json(res, inv.createMaterial(db, body));
+}, { auth: true, role: 'hq' });
+r('PUT', /^\/api\/inventory\/materials\/(\w+)$/, async (req, res, p, user, m, body) => {
+  json(res, inv.updateMaterial(db, m[1], body));
+}, { auth: true, role: 'hq' });
+r('GET', /^\/api\/inventory\/units$/, async (req, res) => {
+  json(res, db.units.map(u => ({ ...u, materialCount: db.materials.filter(x => x.unitId === u.id).length })));
+}, { auth: true });
+r('POST', /^\/api\/inventory\/units$/, async (req, res, p, user, m, body) => {
+  json(res, inv.createUnit(db, body));
+}, { auth: true, role: 'hq' });
+r('DELETE', /^\/api\/inventory\/units\/(\w+)$/, async (req, res, p, user, m) => {
+  json(res, inv.deleteUnit(db, m[1]));
+}, { auth: true, role: 'hq' });
+r('GET', /^\/api\/inventory\/recipes$/, async (req, res) => {
+  json(res, inv.listRecipes(db));
+}, { auth: true });
+r('PUT', /^\/api\/inventory\/recipes\/(\w+)$/, async (req, res, p, user, m, body) => {
+  json(res, inv.upsertRecipe(db, m[1], body, user.name));
+}, { auth: true, role: 'hq' });
+
+/* 总部：库存总览 / 全品牌流水 */
+r('GET', /^\/api\/inventory\/overview$/, async (req, res, p) => {
+  json(res, inv.hqOverview(db, todayStr(), p.query.storeId || null));
+}, { auth: true, role: 'hq' });
+r('GET', /^\/api\/inventory\/ledger$/, async (req, res, p, user) => {
+  let storeId = p.query.storeId || null;
+  if (user.role === 'store') storeId = user.storeId; // 门店只能查本店
+  json(res, inv.queryLedger(db, {
+    storeId, materialId: p.query.materialId || null, type: p.query.type || null,
+    from: p.query.from || null, to: p.query.to || null, limit: p.query.limit,
+  }));
+}, { auth: true });
+
+/* 门店：库存工作台（本店实时库存/预警/临期/在途调拨） */
+r('GET', /^\/api\/stores\/(\w+)\/inventory$/, async (req, res, p, user, m) => {
+  if (user.role === 'store' && user.storeId !== m[1]) return fail(res, '无权查看该门店库存', 403);
+  if (!db.stores.find(s => s.id === m[1])) return fail(res, '门店不存在', 404);
+  json(res, inv.storeWorkbench(db, m[1], todayStr()));
+}, { auth: true });
+
+/* 门店：批次查询（仅本店） */
+r('GET', /^\/api\/inventory\/batches$/, async (req, res, p, user) => {
+  const storeId = user.role === 'store' ? user.storeId : (p.query.storeId || null);
+  if (!storeId) return fail(res, '请指定门店');
+  if (user.role === 'store' && user.storeId !== storeId) return fail(res, '无权查看', 403);
+  let list = db.invBatches.filter(b => b.storeId === storeId);
+  if (p.query.materialId) list = list.filter(b => b.materialId === p.query.materialId);
+  const q = p.query.scope;
+  const today = todayStr();
+  let view = list.map(b => inv.batchView(db, b, today));
+  if (q === 'active') view = view.filter(b => b.availableQty > 0);
+  if (q === 'nearexpire') view = view.filter(b => b.nearExpire || b.expired);
+  view.sort((a, b) => a.expireDate.localeCompare(b.expireDate) || a.receivedAt.localeCompare(b.receivedAt));
+  json(res, view.slice(0, 500));
+}, { auth: true });
+
+/* 门店：批次入库（多明细原子提交 + 幂等） */
+r('POST', /^\/api\/inventory\/stockin$/, async (req, res, p, user, m, body) => {
+  if (user.role !== 'store') return fail(res, '仅门店账号可入库', 403);
+  const out = inv.withIdem(db, `stockin:${user.storeId}`, body.$idem || '', () =>
+    inv.stockIn(db, user.storeId, user.name, body));
+  json(res, out);
+}, { auth: true });
+
+/* 门店：盘点 */
+r('GET', /^\/api\/inventory\/checks$/, async (req, res, p, user) => {
+  let list = db.invChecks;
+  if (user.role === 'store') list = list.filter(c => c.storeId === user.storeId);
+  else if (p.query.storeId) list = list.filter(c => c.storeId === p.query.storeId);
+  json(res, list.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 100).map(c => ({
+    ...inv.checkView(db, c),
+    storeName: db.stores.find(s => s.id === c.storeId)?.name,
+  })));
+}, { auth: true });
+r('POST', /^\/api\/inventory\/checks$/, async (req, res, p, user) => {
+  if (user.role !== 'store') return fail(res, '仅门店可发起盘点', 403);
+  const out = inv.withIdem(db, `check:${user.storeId}`, '', () =>
+    inv.createCheck(db, user.storeId, user.name));
+  json(res, out);
+}, { auth: true });
+r('GET', /^\/api\/inventory\/checks\/(\w+)$/, async (req, res, p, user, m) => {
+  const c = db.invChecks.find(x => x.id === m[1]);
+  if (!c) return fail(res, '盘点单不存在', 404);
+  if (user.role === 'store' && c.storeId !== user.storeId) return fail(res, '无权查看', 403);
+  json(res, { ...inv.checkView(db, c), storeName: db.stores.find(s => s.id === c.storeId)?.name });
+}, { auth: true });
+r('PUT', /^\/api\/inventory\/checks\/(\w+)$/, async (req, res, p, user, m, body) => {
+  if (user.role !== 'store') return fail(res, '仅门店可盘点', 403);
+  json(res, inv.updateCheck(db, user.storeId, body, m[1]));
+}, { auth: true });
+r('POST', /^\/api\/inventory\/checks\/(\w+)\/confirm$/, async (req, res, p, user, m, body) => {
+  if (user.role !== 'store') return fail(res, '仅门店可确认盘点', 403);
+  const out = inv.withIdem(db, `check-confirm:${user.storeId}:${m[1]}`, body.$idem || '', () =>
+    inv.confirmCheck(db, user.storeId, user.name, m[1], body));
+  json(res, out);
+}, { auth: true });
+r('POST', /^\/api\/inventory\/checks\/(\w+)\/cancel$/, async (req, res, p, user, m) => {
+  if (user.role !== 'store') return fail(res, '仅门店可取消盘点', 403);
+  json(res, inv.cancelCheck(db, user.storeId, m[1]));
+}, { auth: true });
+
+/* 跨店调拨 */
+r('GET', /^\/api\/inventory\/transfers$/, async (req, res, p, user) => {
+  const storeId = user.role === 'store' ? user.storeId : (p.query.storeId || null);
+  json(res, inv.listTransfers(db, storeId, p.query.status || null));
+}, { auth: true });
+r('GET', /^\/api\/inventory\/transfers\/(\w+)$/, async (req, res, p, user, m) => {
+  const t = db.invTransfers.find(x => x.id === m[1]);
+  if (!t) return fail(res, '调拨单不存在', 404);
+  if (user.role === 'store' && ![t.fromStoreId, t.toStoreId].includes(user.storeId)) return fail(res, '无权查看', 403);
+  json(res, inv.transferView(db, t, user.storeId));
+}, { auth: true });
+r('POST', /^\/api\/inventory\/transfers$/, async (req, res, p, user, m, body) => {
+  if (user.role !== 'store') return fail(res, '仅门店可发起调拨', 403);
+  const out = inv.withIdem(db, `transfer-create:${user.storeId}`, body.$idem || '', () =>
+    inv.createTransfer(db, user.storeId, user.name, body));
+  json(res, out);
+}, { auth: true });
+r('POST', /^\/api\/inventory\/transfers\/(\w+)\/confirm$/, async (req, res, p, user, m, body) => {
+  if (user.role !== 'store') return fail(res, '仅门店可操作调拨', 403);
+  const out = inv.withIdem(db, `transfer-confirm:${m[1]}`, body.$idem || '', () =>
+    inv.confirmTransfer(db, user.storeId, user.name, m[1]));
+  json(res, out);
+}, { auth: true });
+r('POST', /^\/api\/inventory\/transfers\/(\w+)\/cancel$/, async (req, res, p, user, m, body) => {
+  if (user.role !== 'store') return fail(res, '仅门店可操作调拨', 403);
+  json(res, inv.cancelTransfer(db, user.storeId, user.name, m[1], body));
+}, { auth: true });
+r('POST', /^\/api\/inventory\/transfers\/(\w+)\/reject$/, async (req, res, p, user, m, body) => {
+  if (user.role !== 'store') return fail(res, '仅门店可操作调拨', 403);
+  json(res, inv.rejectTransfer(db, user.storeId, user.name, m[1], body));
+}, { auth: true });
+r('POST', /^\/api\/inventory\/transfers\/(\w+)\/refuse$/, async (req, res, p, user, m, body) => {
+  if (user.role !== 'store') return fail(res, '仅门店可操作调拨', 403);
+  json(res, inv.refuseTransfer(db, user.storeId, user.name, m[1], body));
+}, { auth: true });
+r('POST', /^\/api\/inventory\/transfers\/(\w+)\/receive$/, async (req, res, p, user, m, body) => {
+  if (user.role !== 'store') return fail(res, '仅门店可操作调拨', 403);
+  const out = inv.withIdem(db, `transfer-receive:${m[1]}`, body.$idem || '', () =>
+    inv.receiveTransfer(db, user.storeId, user.name, m[1], body));
+  json(res, out);
+}, { auth: true });
+
+/* 耗材配方占用查询（只读，开单页选择项目即展示，不依赖技师） */
+r('GET', /^\/api\/inventory\/requirement$/, async (req, res, p, user) => {
+  const storeId = user.role === 'store' ? user.storeId : (p.query.storeId || null);
+  if (!storeId) return fail(res, '请指定门店');
+  if (!p.query.serviceId) return fail(res, '缺少项目参数');
+  json(res, inv.quoteRequirement(db, storeId, p.query.serviceId, todayStr()));
+}, { auth: true });
 
 /* ---------------- 静态文件 ---------------- */
 const MIME = {
@@ -671,8 +881,12 @@ const server = http.createServer(async (req, res) => {
       serveStatic(req, res, pathname);
     }
   } catch (e) {
-    console.error(e);
-    fail(res, '服务器内部错误：' + e.message, 500);
+    if (e.code && e.code >= 400 && e.code < 500) {
+      fail(res, e.message, e.code);
+    } else {
+      console.error(e);
+      fail(res, '服务器内部错误：' + e.message, 500);
+    }
   }
 });
 

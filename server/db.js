@@ -81,6 +81,103 @@ const TRAIN_TOPICS = ['新员工岗前培训', '足底反射区进阶', '肩颈�
 
 const STORE_FACTOR = { S01: 1.35, S02: 1.2, S03: 1.05, S04: 1.15, S05: 0.95, S06: 1.0 };
 
+/* ---------------- 耗材库存基础数据 ---------------- */
+// [名称, 单位, 安全库存, 参考成本, 每批数量区间]
+const MATERIAL_DEFS = [
+  ['一次性泡脚袋', '包', 30, 6, [20, 80]],
+  ['生姜泡脚药包', '包', 40, 3, [30, 120]],
+  ['艾草泡脚药包', '包', 40, 3, [30, 120]],
+  ['草本足浴盐', '包', 25, 8, [20, 90]],
+  ['基础按摩精油', '瓶', 8, 45, [6, 24]],
+  ['SPA 香薰精油', '瓶', 6, 120, [4, 18]],
+  ['刮痧润肤油', '瓶', 5, 28, [4, 16]],
+  ['一次性消毒毛巾', '条', 200, 0.8, [100, 400]],
+  ['一次性床单', '包', 30, 12, [20, 80]],
+  ['一次性拖鞋', '双', 150, 1.2, [80, 300]],
+  ['一次性修脚刀片', '个', 60, 2, [50, 160]],
+  ['采耳一次性工具套', '套', 40, 3.5, [30, 100]],
+  ['硅胶拔罐器', '个', 10, 6, [8, 30]],
+  ['陈年艾条', '盒', 12, 18, [10, 40]],
+  ['能量热石', '个', 6, 25, [4, 16]],
+];
+const INV_UNIT_NAMES = ['个', '包', '瓶', '双', '盒', '条', '套'];
+const INV_SUPPLIERS = ['杭州养生堂供应链', '广州白云日化', '上海康洁耗材', '福建本草堂', '苏州金兰日化'];
+// 服务项目标准耗用配方：项目 -> [[耗材名, 数量]]
+const RECIPE_DEFS = {
+  V01: [['一次性泡脚袋', 1], ['一次性消毒毛巾', 1], ['一次性拖鞋', 1]],
+  V02: [['生姜泡脚药包', 1], ['一次性泡脚袋', 1], ['一次性消毒毛巾', 1], ['一次性拖鞋', 1]],
+  V03: [['艾草泡脚药包', 1], ['一次性泡脚袋', 1], ['一次性消毒毛巾', 2], ['一次性拖鞋', 1], ['硅胶拔罐器', 1]],
+  V04: [['基础按摩精油', 0.05], ['一次性消毒毛巾', 1]],
+  V05: [['基础按摩精油', 0.08], ['一次性消毒毛巾', 2]],
+  V06: [['基础按摩精油', 0.05], ['一次性消毒毛巾', 1]],
+  V07: [['SPA 香薰精油', 0.1], ['一次性床单', 1], ['一次性消毒毛巾', 2]],
+  V08: [['SPA 香薰精油', 0.08], ['一次性床单', 1], ['一次性消毒毛巾', 2]],
+  V09: [['陈年艾条', 0.5], ['一次性泡脚袋', 1]],
+  V10: [['刮痧润肤油', 0.05], ['一次性消毒毛巾', 1]],
+  V11: [['采耳一次性工具套', 1], ['一次性消毒毛巾', 1]],
+  V12: [['一次性修脚刀片', 1], ['一次性消毒毛巾', 1]],
+};
+
+/* 库存种子：单位/耗材/配方 + 每店每耗材 2~3 个批次（含低库存、临期、过期样例） */
+function buildInventory(db, id, today) {
+  const unitId = {};
+  INV_UNIT_NAMES.forEach(name => {
+    const u = { id: id('unit', 'UN', 2), name };
+    db.units.push(u); unitId[name] = u.id;
+  });
+  const matId = {};
+  MATERIAL_DEFS.forEach(([name, unit, safety]) => {
+    const m = { id: id('material', 'MT', 2), name, unitId: unitId[unit], safetyStock: safety, active: 1, remark: '' };
+    db.materials.push(m); matId[name] = m.id;
+  });
+  Object.entries(RECIPE_DEFS).forEach(([serviceId, items]) => {
+    db.recipes.push({
+      id: id('recipe', 'RP', 3), serviceId,
+      items: items.map(([name, qty]) => ({ materialId: matId[name], qty })),
+      updatedAt: nowLocal(), updatedBy: '总部运营',
+    });
+  });
+
+  for (const s of STORES) {
+    for (const [, d] of MATERIAL_DEFS.entries()) {
+      const [name, , safety, cost, range] = d;
+      const mId = matId[name];
+      const n = ri(2, 3);
+      const lowStock = rand() < 0.2; // 约 1/5 的「门店×耗材」做成低库存样例
+      for (let k = 0; k < n; k++) {
+        const receivedDaysAgo = ri(8, 26) + k * ri(20, 34);
+        const rd = new Date(today.getTime() - receivedDaysAgo * 864e5);
+        rd.setHours(ri(9, 17), ri(0, 59), 0, 0);
+        const produced = new Date(rd.getTime() - ri(20, 120) * 864e5);
+        let exp = new Date(rd.getTime() + ri(240, 540) * 864e5);
+        const roll = rand();
+        if (roll < 0.1) exp = new Date(today.getTime() + ri(2, 28) * 864e5);       // 临期
+        else if (roll < 0.14) exp = new Date(today.getTime() - ri(1, 25) * 864e5); // 已过期
+        const qty = lowStock
+          ? ri(1, Math.max(1, Math.ceil(safety / (n + 1))))
+          : ri(range[0], range[1]);
+        const batchNo = `LOT${fmtDate(rd).replace(/-/g, '')}${ri(100, 999)}`;
+        const receivedAt = `${fmtDate(rd)} ${pad(rd.getHours())}:${pad(rd.getMinutes())}:00`;
+        const batch = {
+          id: id('batch', 'B', 6), storeId: s.id, materialId: mId, batchNo,
+          qty, remainingQty: qty, frozenQty: 0,
+          unitCost: Math.round(cost * (0.85 + rand() * 0.3) * 100) / 100,
+          supplier: pick(INV_SUPPLIERS),
+          producedDate: fmtDate(produced), expireDate: fmtDate(exp),
+          sourceType: 'stockin', sourceRef: null,
+          receivedAt, createdBy: s.manager, remark: '',
+        };
+        db.invBatches.push(batch);
+        db.invLedger.push({
+          id: id('ledger', 'L', 6), ts: receivedAt, storeId: s.id, materialId: mId, batchId: batch.id,
+          direction: 'in', type: 'stockin', qty, refType: 'stockin', refId: batch.id, refNo: batchNo,
+          operator: s.manager, remark: '期初采购入库',
+        });
+      }
+    }
+  }
+}
+
 /* ---------------- 种子生成 ---------------- */
 function buildSeed() {
   const db = {
@@ -102,6 +199,15 @@ function buildSeed() {
     orders: [],
     shifts: [],
     handovers: [],
+    /* 耗材库存 */
+    units: [],
+    materials: [],
+    recipes: [],
+    invBatches: [],
+    invChecks: [],
+    invTransfers: [],
+    invLedger: [],
+    idempotency: [],
   };
   const seq = (key) => { db.counters[key] = (db.counters[key] || 0) + 1; return db.counters[key]; };
   const id = (key, prefix, len = 4) => `${prefix}${String(seq(key)).padStart(len, '0')}`;
@@ -323,6 +429,9 @@ function buildSeed() {
     });
   }
 
+  /* ---------- 耗材库存种子（单位/耗材/配方/批次/期初流水） ---------- */
+  buildInventory(db, id, today);
+
   db.meta.orderCount = db.orders.length;
   return db;
 }
@@ -331,11 +440,25 @@ function buildSeed() {
 let db = null;
 let saveTimer = null;
 
+/* 老版本 db.json 迁移：补齐耗材库存表并生成库存种子 */
+function migrateInventory(d) {
+  if (d && Array.isArray(d.units) && Array.isArray(d.materials) && d.invLedger) return d;
+  ['units', 'materials', 'recipes', 'invBatches', 'invChecks', 'invTransfers', 'invLedger'].forEach(k => { if (!Array.isArray(d[k])) d[k] = []; });
+  if (!d.idempotency) d.idempotency = [];
+  if (!d.units.length) {
+    const seq = (key) => { d.counters[key] = (d.counters[key] || 0) + 1; return d.counters[key]; };
+    const mid = (key, prefix, len = 4) => `${prefix}${String(seq(key)).padStart(len, '0')}`;
+    buildInventory(d, mid, new Date(new Date().setHours(0, 0, 0, 0)));
+    save(true);
+  }
+  return d;
+}
+
 function load() {
   if (db) return db;
   try {
     if (fs.existsSync(DB_FILE)) {
-      db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+      db = migrateInventory(JSON.parse(fs.readFileSync(DB_FILE, 'utf8')));
     } else {
       db = buildSeed();
       save(true);

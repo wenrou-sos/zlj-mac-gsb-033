@@ -19,11 +19,24 @@ const App = {
       { path: '/hq/handovers', icon: '📋', name: '交班记录' },
       { path: '/hq/recharges', icon: '💳', name: '充值流水' },
     ]},
+    { role: 'hq', group: '耗材库存', items: [
+      { path: '/hq/inventory/overview', icon: '📦', name: '库存总览' },
+      { path: '/hq/inventory/master', icon: '📐', name: '耗材与配方标准' },
+      { path: '/hq/inventory/ledger', icon: '📒', name: '出入库流水' },
+    ]},
     { role: 'store', group: '门店运营', items: [
       { path: '/store/dashboard', icon: '🏠', name: '门店看板' },
       { path: '/store/orders', icon: '🧾', name: '上钟开单' },
       { path: '/store/handover', icon: '📝', name: '交班结算' },
       { path: '/store/performance', icon: '💰', name: '技师业绩提成' },
+    ]},
+    { role: 'store', group: '耗材库存', items: [
+      { path: '/store/inventory/workbench', icon: '🧰', name: '库存工作台' },
+      { path: '/store/inventory/stockin', icon: '📥', name: '批次入库' },
+      { path: '/store/inventory/batches', icon: '🏷️', name: '批次库存/临期' },
+      { path: '/store/inventory/check', icon: '🧮', name: '库存盘点' },
+      { path: '/store/inventory/transfers', icon: '🔁', name: '跨店调拨' },
+      { path: '/store/inventory/ledger', icon: '📒', name: '出入库流水' },
     ]},
     { role: 'store', group: '人员与会员', items: [
       { path: '/store/technicians', icon: '🧑‍🔧', name: '技师管理' },
@@ -36,9 +49,13 @@ const App = {
     '/hq/dashboard': '品牌经营看板', '/hq/stores': '门店管理', '/hq/services': '项目与统一定价',
     '/hq/membership': '会员体系', '/hq/commission': '技师提成标准', '/hq/technicians': '技师档案',
     '/hq/transfers': '跨店调动记录', '/hq/orders': '全部门店账单', '/hq/handovers': '交班记录', '/hq/recharges': '会员充值流水',
+    '/hq/inventory/overview': '总部库存总览', '/hq/inventory/master': '耗材与配方标准', '/hq/inventory/ledger': '耗材出入库流水',
     '/store/dashboard': '门店看板', '/store/orders': '上钟开单', '/store/handover': '交班结算',
     '/store/performance': '技师业绩提成', '/store/technicians': '技师管理', '/store/members': '会员管理',
     '/store/handovers': '历史交班记录',
+    '/store/inventory/workbench': '门店库存工作台', '/store/inventory/stockin': '耗材批次入库',
+    '/store/inventory/batches': '批次库存与临期', '/store/inventory/check': '库存盘点',
+    '/store/inventory/transfers': '跨店调拨', '/store/inventory/ledger': '本店出入库流水',
   },
 
   async start() {
